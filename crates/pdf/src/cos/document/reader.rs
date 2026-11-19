@@ -7,6 +7,18 @@ use super::xref::{
 use super::{Arc, BTreeMap, CosError, Dict, Document, HashMap, HashSet, Lexer, ObjRef, Object, is_whitespace, parse_indirect, parse_indirect_shared};
 
 impl Document {
+    /// The position in the file of the cross-reference offset `off`, moved on by `shift` bytes (the
+    /// header offset, on the retry relative to the header). A hostile `startxref` or `/Prev` can name
+    /// any 64-bit value: it is converted and added with checks (a 32-bit `usize` is what wasm32
+    /// has) and must land inside the file, or the section is unreadable.
+    fn xref_position(&self, off: u64, shift: usize) -> Result<usize, CosError> {
+        usize::try_from(off)
+            .ok()
+            .and_then(|o| o.checked_add(shift))
+            .filter(|pos| *pos <= self.data.len())
+            .ok_or(CosError::Syntax { offset: 0, detail: format!("cross-reference offset {off} is outside the file") })
+    }
+
     #[allow(clippy::type_complexity)]
     pub(super) fn read_xref_chain(&self, log: &mut Vec<String>) -> Result<(XrefIndex, Dict, Vec<Revision>, Vec<(u64, u32)>), CosError> {
         let mut compact_log = Vec::new();
@@ -43,12 +55,12 @@ impl Document {
                 log.push(format!("cross-reference chain loops at offset {off}; stopped"));
                 break;
             }
-            let ((primary, sect_trailer, is_stream), header_relative) = match self.read_compact_section(off as usize) {
+            let ((primary, sect_trailer, is_stream), header_relative) = match self.xref_position(off, 0).and_then(|pos| self.read_compact_section(pos)) {
                 Ok(Some(v)) => (v, false),
                 Ok(None) => return Ok(None),
                 Err(e) if self.header_offset > 0 => {
                     log.push(format!("xref at {off} unreadable ({e}); retrying relative to the header"));
-                    match self.read_compact_section(off as usize + self.header_offset)? {
+                    match self.read_compact_section(self.xref_position(off, self.header_offset)?)? {
                         Some(v) => (v, true),
                         None => return Ok(None),
                     }
@@ -376,14 +388,16 @@ impl Document {
             // Object numbers whose entry in this section was set aside ([`Self::xref_oddities`]).
             let mut odd = Vec::new();
             let rows_before = merged_rows;
-            let ((sect_trailer, is_stream), header_relative) = match self.read_section(off as usize, &mut sect, &mut odd, &mut merged_rows, log) {
+            let first = self.xref_position(off, 0).and_then(|pos| self.read_section(pos, &mut sect, &mut odd, &mut merged_rows, log));
+            let ((sect_trailer, is_stream), header_relative) = match first {
                 Ok(v) => (v, false),
                 Err(e) if self.header_offset > 0 => {
                     log.push(format!("xref at {off} unreadable ({e}); retrying relative to the header"));
                     sect.clear();
                     odd.clear();
                     merged_rows = rows_before;
-                    (self.read_section(off as usize + self.header_offset, &mut sect, &mut odd, &mut merged_rows, log)?, true)
+                    let pos = self.xref_position(off, self.header_offset)?;
+                    (self.read_section(pos, &mut sect, &mut odd, &mut merged_rows, log)?, true)
                 }
                 Err(e) => {
                     // An unreadable older section loses every object only it locates (the page

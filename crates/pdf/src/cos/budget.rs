@@ -398,6 +398,24 @@ impl DecodeBudget {
         }
     }
 
+    /// Charges `n` bytes of text or data the caller is about to copy out of the file (a string
+    /// object, which needs no decoding but is as large as the file makes it). Fails once what is
+    /// left is less than `n`, and spends all of it: the same refusal as a stream decode past the
+    /// allowance. Fork addition (see FORK.md).
+    pub fn charge_bytes(&mut self, n: usize) -> Result<(), CosError> {
+        match self.bytes.checked_sub(n) {
+            Some(left) => {
+                self.bytes = left;
+                Ok(())
+            }
+            None => {
+                self.bytes = 0;
+                self.refusals += 1;
+                Err(CosError::Filter(FilterError::LimitExceeded(self.limit).to_string()))
+            }
+        }
+    }
+
     /// Counts one form entry. `false` once [`DecodeBudget::new`]'s `forms` entries are spent:
     /// the caller leaves that form out.
     pub fn enter_form(&mut self) -> bool {

@@ -2711,3 +2711,18 @@ fn find_agrees_with_a_plain_window_search() {
         assert_eq!(find(&hay, needle, from, to), naive(&hay, needle, from, to), "{hay:?} {needle:?} {from} {to}");
     }
 }
+
+/// Review finding C-H2: a file with bytes before `%PDF-` whose `startxref` is 4294967295 asks the
+/// header-relative retry for offset 4294967295 plus the header offset, which overflows a 32-bit
+/// `usize` (wasm32). Opening must not panic or wrap; the file is rebuilt from its object headers.
+/// Both retries (the compact reader and the materialized reader) are reached by the same file.
+#[test]
+fn a_huge_startxref_with_a_shifted_header_does_not_overflow() {
+    for tail in ["startxref\n4294967295\n%%EOF", "startxref\n4294967296\n%%EOF", "startxref\n9223372036854775807\n%%EOF"] {
+        let mut bytes = b" %PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [] /Count 0 >> endobj\n".to_vec();
+        bytes.extend_from_slice(b"trailer\n<< /Size 3 /Root 1 0 R >>\n");
+        bytes.extend_from_slice(tail.as_bytes());
+        let doc = Document::open(Arc::new(bytes)).expect("a damaged xref is rebuilt from the object headers");
+        assert!(doc.reconstructed(), "{tail}: the offset names nothing in the file, so the file is rebuilt");
+    }
+}
